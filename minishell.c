@@ -9,199 +9,190 @@
  *   waitpid() - processo pai aguarda filho terminar
  *   getcwd()  - obtem diretorio atual (para o prompt)
  *   chdir()   - muda de diretorio (comando interno cd)
+ *   read()    - leitura do terminal (via STDIN_FILENO)
  *   write()   - escrita no terminal (via STDOUT_FILENO)
- *   read()    - leitura do terminal  (via STDIN_FILENO)
+ *   open()    - abre arquivo para redirecionamento
+ *   close()   - fecha descritor de arquivo
+ *   dup2()    - redireciona stdin/stdout para arquivo
  *   exit()    - encerra o processo
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>      /* fork, execvp, getcwd, chdir, read, write */
-#include <sys/types.h>   /* pid_t                                     */
-#include <sys/wait.h>    /* waitpid, WIFEXITED, WEXITSTATUS           */
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
-/* ------------------------------------------------------------------ */
-/*  Constantes                                                          */
-/* ------------------------------------------------------------------ */
-#define TRUE          1
-#define MAX_INPUT   512          /* tamanho maximo da linha de comando */
-#define MAX_ARGS     64          /* numero maximo de argumentos        */
-#define DELIMITERS  " \t\n"     /* separadores de tokens              */
+#define TRUE         1
+#define MAX_INPUT  512
+#define MAX_ARGS    64
+#define DELIMITERS " \t\n"
 
-/* ------------------------------------------------------------------ */
-/*  type_prompt  -  exibe o prompt na tela                             */
-/*  Equivalente a type_prompt() do pseudocodigo do Tanenbaum           */
-/* ------------------------------------------------------------------ */
+typedef struct {
+    char  *argv[MAX_ARGS];
+    int    argc;
+    char  *redir_in;
+    char  *redir_out;
+    char  *redir_app;
+} Command;
+
 void type_prompt(void)
 {
     char cwd[512];
-
-    /* getcwd() - chamada de sistema que obtem o diretorio corrente */
-    if (getcwd(cwd, sizeof(cwd)) != NULL) {
-        /* Destaca usuario@minishell e diretorio atual */
+    if (getcwd(cwd, sizeof(cwd)) != NULL)
         printf("\033[1;32mminishell\033[0m:\033[1;34m%s\033[0m$ ", cwd);
-    } else {
+    else
         printf("minishell$ ");
-    }
-
     fflush(stdout);
 }
 
-/* ------------------------------------------------------------------ */
-/*  read_command  -  le a linha digitada e a divide em tokens          */
-/*  Equivalente a read_command(command, parameters) do Tanenbaum       */
-/*                                                                      */
-/*  Retorna:  0 se leu um comando, -1 em caso de EOF ou erro           */
-/* ------------------------------------------------------------------ */
-int read_command(char *command, char **parameters)
+int read_command(Command *cmd)
 {
-    char buffer[MAX_INPUT];
-    int  i = 0;
-    char c;
+    static char buffer[MAX_INPUT];
+    int     i = 0;
+    char    c;
     ssize_t n;
 
-    /* Usa a chamada de sistema read() sobre STDIN_FILENO */
+    memset(cmd, 0, sizeof(Command));
+
     while (i < (int)sizeof(buffer) - 1) {
         n = read(STDIN_FILENO, &c, 1);
-        if (n <= 0) return -1;   /* EOF ou erro */
+        if (n <= 0) return -1;
         if (c == '\n') break;
         buffer[i++] = c;
     }
     buffer[i] = '\0';
 
-    /* Linha vazia: nada a executar */
-    if (i == 0) {
-        command[0]    = '\0';
-        parameters[0] = NULL;
-        return 0;
-    }
+    if (i == 0) return 0;
 
-    /* Tokeniza a linha usando strtok */
-    int argc = 0;
     char *token = strtok(buffer, DELIMITERS);
-    while (token != NULL && argc < MAX_ARGS - 1) {
-        parameters[argc++] = token;
+    while (token != NULL) {
+        if (strcmp(token, ">>") == 0) {
+            token = strtok(NULL, DELIMITERS);
+            if (token) cmd->redir_app = token;
+        } else if (strcmp(token, ">") == 0) {
+            token = strtok(NULL, DELIMITERS);
+            if (token) cmd->redir_out = token;
+        } else if (strcmp(token, "<") == 0) {
+            token = strtok(NULL, DELIMITERS);
+            if (token) cmd->redir_in = token;
+        } else {
+            if (cmd->argc < MAX_ARGS - 1)
+                cmd->argv[cmd->argc++] = token;
+        }
         token = strtok(NULL, DELIMITERS);
     }
-    parameters[argc] = NULL;   /* execvp exige vetor terminado em NULL */
-
-    /* O primeiro token e o proprio comando */
-    strncpy(command, parameters[0], MAX_INPUT - 1);
-    command[MAX_INPUT - 1] = '\0';
-
+    cmd->argv[cmd->argc] = NULL;
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Comandos internos (built-ins)                                       */
-/*  Precisam rodar no proprio processo do shell, nao em filho           */
-/* ------------------------------------------------------------------ */
-
-/* Retorna 1 se o comando foi tratado como built-in, 0 caso contrario */
-int handle_builtin(char *command, char **parameters)
+/*
+ * apply_redirections
+ * Redireciona stdin/stdout do processo filho usando:
+ *   open()  - abre/cria o arquivo
+ *   dup2()  - copia fd para STDIN_FILENO ou STDOUT_FILENO
+ *   close() - fecha o fd original apos duplicar
+ */
+void apply_redirections(Command *cmd)
 {
-    /* --- exit / quit -------------------------------------------- */
+    int fd;
+
+    /* < arquivo : redireciona entrada */
+    if (cmd->redir_in) {
+        fd = open(cmd->redir_in, O_RDONLY);
+        if (fd < 0) { perror(cmd->redir_in); exit(1); }
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+    }
+
+    /* > arquivo : redireciona saida (sobrescreve) */
+    if (cmd->redir_out) {
+        fd = open(cmd->redir_out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) { perror(cmd->redir_out); exit(1); }
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+    }
+
+    /* >> arquivo : redireciona saida (append) */
+    if (cmd->redir_app) {
+        fd = open(cmd->redir_app, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd < 0) { perror(cmd->redir_app); exit(1); }
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+    }
+}
+
+int handle_builtin(Command *cmd)
+{
+    if (cmd->argc == 0) return 0;
+    char *command = cmd->argv[0];
+
     if (strcmp(command, "exit") == 0 || strcmp(command, "quit") == 0) {
         printf("Encerrando o shell. Ate mais!\n");
         exit(0);
     }
 
-    /* --- cd ----------------------------------------------------- */
     if (strcmp(command, "cd") == 0) {
-        const char *path = parameters[1];
-        if (path == NULL) {
-            /* cd sem argumento vai para $HOME */
-            path = getenv("HOME");
-            if (path == NULL) path = "/";
-        }
-        /* chdir() - chamada de sistema para mudar de diretorio */
-        if (chdir(path) != 0) {
-            perror("cd");
-        }
+        const char *path = cmd->argv[1];
+        if (!path) { path = getenv("HOME"); if (!path) path = "/"; }
+        if (chdir(path) != 0) perror("cd");
         return 1;
     }
 
-    /* --- help --------------------------------------------------- */
     if (strcmp(command, "help") == 0) {
         printf("=== minishell - comandos internos ===\n");
-        printf("  cd [dir]  : muda de diretorio\n");
-        printf("  exit/quit : encerra o shell\n");
-        printf("  help      : exibe esta mensagem\n");
-        printf("Qualquer outro comando e executado via execvp().\n");
+        printf("  cd [dir]       : muda de diretorio\n");
+        printf("  exit / quit    : encerra o shell\n");
+        printf("  help           : esta mensagem\n");
+        printf("\n=== redirecionamentos suportados ===\n");
+        printf("  cmd > arq      : redireciona saida (sobrescreve)\n");
+        printf("  cmd >> arq     : redireciona saida (append)\n");
+        printf("  cmd < arq      : redireciona entrada\n");
+        printf("  cmd < in > out : entrada e saida simultaneos\n");
         return 1;
     }
 
-    return 0;   /* nao e built-in */
+    return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/*  main  -  loop principal do shell                                    */
-/*  Segue EXATAMENTE o pseudocodigo do Tanenbaum (Figura 1.19)         */
-/* ------------------------------------------------------------------ */
 int main(void)
 {
-    char   command[MAX_INPUT];
-    char  *parameters[MAX_ARGS];
-    int    status;
-    pid_t  pid;
+    Command cmd;
+    int     status;
+    pid_t   pid;
 
     printf("=== minishell iniciado (digite 'help' ou 'exit') ===\n");
 
-    while (TRUE) {                          /* repita para sempre */
+    while (TRUE) {
 
-        type_prompt();                      /* mostra prompt na tela */
+        type_prompt();
 
-        if (read_command(command, parameters) == -1) {
-            /* EOF (Ctrl+D): encerra o shell graciosamente */
+        if (read_command(&cmd) == -1) {
             printf("\nEOF detectado. Saindo...\n");
             break;
         }
 
-        /* Linha vazia: volta ao inicio do loop */
-        if (command[0] == '\0') continue;
+        if (cmd.argc == 0) continue;
 
-        /* Trata comandos internos antes de criar filho */
-        if (handle_builtin(command, parameters)) continue;
+        if (handle_builtin(&cmd)) continue;
 
-        /* -------------------------------------------------------- */
-        /*  fork() - cria processo filho                             */
-        /* -------------------------------------------------------- */
+        /* fork() - cria processo filho */
         pid = fork();
 
         if (pid != 0) {
-            /* ----------------------------------------------------- */
-            /*  Codigo do processo PAI                                */
-            /* ----------------------------------------------------- */
-
-            /* waitpid() - aguarda o processo filho acabar           */
+            /* Processo PAI: aguarda filho */
             waitpid(pid, &status, 0);
-
-            /* Informa codigo de saida caso diferente de zero */
-            if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
                 printf("[minishell] processo filho terminou com codigo %d\n",
                        WEXITSTATUS(status));
-            }
-
         } else {
-            /* ----------------------------------------------------- */
-            /*  Codigo do processo FILHO                              */
-            /* ----------------------------------------------------- */
-
-            /*
-             * execvp() - executa o comando
-             * Diferenca em relacao ao execve() do Tanenbaum:
-             *   execvp busca o executavel no PATH automaticamente,
-             *   dispensando o caminho absoluto.
-             *   Assinatura: execvp(command, parameters)
-             */
-            execvp(command, parameters);
-
-            /*
-             * Se execvp retornar, houve erro (comando nao encontrado).
-             * O filho deve sair para nao duplicar o loop do shell.
-             */
-            perror(command);
+            /* Processo FILHO: aplica redirecionamentos e executa */
+            apply_redirections(&cmd);
+            execvp(cmd.argv[0], cmd.argv);
+            perror(cmd.argv[0]);
             exit(1);
         }
     }
