@@ -14,6 +14,8 @@
  *   open()    - abre arquivo para redirecionamento
  *   close()   - fecha descritor de arquivo
  *   dup2()    - redireciona stdin/stdout para arquivo
+ *   mkdir()   - cria diretorio (built-in mkdir)
+ *   rmdir()   - remove diretorio vazio (built-in rmdir)
  *   exit()    - encerra o processo
  */
 
@@ -142,10 +144,51 @@ int handle_builtin(Command *cmd)
         return 1;
     }
 
+    /*
+     * mkdir [dir] - cria um diretorio
+     * Chamada de sistema: mkdir(path, mode)
+     *   mode 0755 = rwxr-xr-x (dono tem tudo, outros podem entrar e listar)
+     */
+    if (strcmp(command, "mkdir") == 0) {
+        if (cmd->argv[1] == NULL) {
+            fprintf(stderr, "mkdir: falta o nome do diretorio\n");
+            return 1;
+        }
+        /* percorre todos os argumentos: mkdir a b c cria tres diretorios */
+        for (int i = 1; cmd->argv[i] != NULL; i++) {
+            if (mkdir(cmd->argv[i], 0755) != 0)
+                perror(cmd->argv[i]);
+            else
+                printf("Diretorio '%s' criado\n", cmd->argv[i]);
+        }
+        return 1;
+    }
+
+    /*
+     * rmdir [dir] - remove um diretorio VAZIO
+     * Chamada de sistema: rmdir(path)
+     * Falha se o diretorio nao estiver vazio (use 'rm -r' para isso)
+     */
+    if (strcmp(command, "rmdir") == 0) {
+        if (cmd->argv[1] == NULL) {
+            fprintf(stderr, "rmdir: falta o nome do diretorio\n");
+            return 1;
+        }
+        for (int i = 1; cmd->argv[i] != NULL; i++) {
+            if (rmdir(cmd->argv[i]) != 0)
+                perror(cmd->argv[i]);
+            else
+                printf("Diretorio '%s' removido\n", cmd->argv[i]);
+        }
+        return 1;
+    }
+
     if (strcmp(command, "help") == 0) {
         printf("=== minishell - comandos internos ===\n");
-        printf("  cd [dir]       : muda de diretorio\n");
-        printf("  exit / quit    : encerra o shell\n");
+        printf("  cd [dir]       : muda de diretorio        (chdir)\n");
+        printf("  mkdir [dir]    : cria diretorio            (mkdir)\n");
+        printf("  rmdir [dir]    : remove diretorio vazio    (rmdir)\n");
+        printf("  exit / quit    : encerra o shell           (exit)\n");
         printf("  help           : esta mensagem\n");
         printf("\n=== redirecionamentos suportados ===\n");
         printf("  cmd > arq      : redireciona saida (sobrescreve)\n");
