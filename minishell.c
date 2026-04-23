@@ -27,9 +27,11 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <errno.h>
 
 #define TRUE         1
-#define MAX_INPUT  512
+#define MAX_LINE   512
 #define MAX_ARGS    64
 #define DELIMITERS " \t\n"
 
@@ -53,7 +55,7 @@ void type_prompt(void)
 
 int read_command(Command *cmd)
 {
-    static char buffer[MAX_INPUT];
+    static char buffer[MAX_LINE];
     int     i = 0;
     char    c;
     ssize_t n;
@@ -139,8 +141,32 @@ int handle_builtin(Command *cmd)
 
     if (strcmp(command, "cd") == 0) {
         const char *path = cmd->argv[1];
-        if (!path) { path = getenv("HOME"); if (!path) path = "/"; }
-        if (chdir(path) != 0) perror("cd");
+        if (!path) {
+            path = getenv("HOME");
+            if (!path) path = "/";
+        }
+        if (chdir(path) != 0)
+            perror("cd");
+        return 1;
+    }
+
+    if (strcmp(command, "ls") == 0) {
+        const char *path = cmd->argv[1] ? cmd->argv[1] : ".";
+        DIR *dir = opendir(path);
+        struct dirent *entry;
+
+        if (dir == NULL) {
+            perror("ls");
+            return 1;
+        }
+
+        while ((entry = readdir(dir)) != NULL) {
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                continue;
+            printf("%s\n", entry->d_name);
+        }
+
+        closedir(dir);
         return 1;
     }
 
@@ -185,7 +211,8 @@ int handle_builtin(Command *cmd)
 
     if (strcmp(command, "help") == 0) {
         printf("=== minishell - comandos internos ===\n");
-        printf("  cd [dir]       : muda de diretorio        (chdir)\n");
+        printf("  cd [dir]       : muda de diretorio         (chdir)\n");
+        printf("  ls [dir]       : lista arquivos/diretorios (opendir/readdir)\n");
         printf("  mkdir [dir]    : cria diretorio            (mkdir)\n");
         printf("  rmdir [dir]    : remove diretorio vazio    (rmdir)\n");
         printf("  exit / quit    : encerra o shell           (exit)\n");
